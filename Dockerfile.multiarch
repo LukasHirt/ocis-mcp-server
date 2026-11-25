@@ -1,0 +1,75 @@
+FROM docker.io/golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS source
+
+ARG GIT_REF="main"
+# Optional exact commit to build. CI passes the commit the verified release tag
+# points to, which pins the clone to it (a tag moved after it was resolved
+# cannot change what gets built) and, because it is referenced in the clone
+# layer below, busts the build cache whenever it changes. Leave empty to clone
+# GIT_REF as-is.
+ARG GIT_SHA=""
+
+RUN apk add --no-cache git && \
+    git clone --depth 1 --branch "${GIT_REF}" https://github.com/owncloud/ocis-mcp-server.git /src && \
+    if [ -n "${GIT_SHA}" ]; then \
+      git -C /src fetch --depth 1 origin "${GIT_SHA}" && \
+      git -C /src checkout --detach FETCH_HEAD; \
+    fi
+
+
+# The newest Go toolchain rather than go.mod's minimum: the Go standard library
+# is compiled into the binary, and Trivy reports its CVEs.
+FROM docker.io/golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
+
+ARG TARGETARCH
+# Reported by the server in its MCP `initialize` response (serverInfo.version),
+# which the CI smoke test checks.
+ARG VERSION=""
+
+COPY --from=source /src /src
+
+WORKDIR /src
+RUN go mod download && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
+      go build -trimpath -ldflags="-s -w -X main.version=${VERSION:-dev}" \
+        -o /out/ocis-mcp-server ./cmd/ocis-mcp-server
+
+
+FROM docker.io/alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+
+ARG VERSION=""
+ARG REVISION=""
+
+LABEL maintainer="ownCloud GmbH <devops@owncloud.com>" \
+  org.opencontainers.image.title="oCIS MCP Server" \
+  org.opencontainers.image.vendor="ownCloud GmbH" \
+  org.opencontainers.image.authors="ownCloud GmbH" \
+  org.opencontainers.image.description="oCIS MCP Server - Model Context Protocol server for ownCloud Infinite Scale" \
+  org.opencontainers.image.licenses="Apache-2.0" \
+  org.opencontainers.image.documentation="https://github.com/owncloud/ocis-mcp-server" \
+  org.opencontainers.image.url="https://hub.docker.com/r/owncloud/ocis-mcp-server" \
+  org.opencontainers.image.source="https://github.com/owncloud/ocis-mcp-server" \
+  org.opencontainers.image.version="${VERSION:-main-${REVISION}}" \
+  org.opencontainers.image.revision="${REVISION}"
+
+# ca-certificates for TLS to oCIS, tzdata for log timestamps. A fixed non-root
+# uid/gid, so orchestrators can pin runAsUser.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates tzdata && \
+    addgroup -S -g 10001 mcp && \
+    adduser -S -D -H -u 10001 -G mcp -s /sbin/nologin mcp
+
+COPY --from=build /out/ocis-mcp-server /usr/local/bin/ocis-mcp-server
+COPY --from=source /src/LICENSE /usr/share/doc/ocis-mcp-server/
+
+# The default transport is stdio (`docker run -i`), which opens no port. With
+# OCIS_MCP_TRANSPORT=http the server listens here, on all interfaces so it can
+# be reached from outside the container; it then refuses to start unless
+# OCIS_MCP_HTTP_SECRET is set (v1.1.0 and later, the oldest image built).
+ENV OCIS_MCP_HTTP_ADDR=0.0.0.0:8090
+
+USER 10001:10001
+
+# HTTP transport only: the MCP endpoint is /mcp.
+EXPOSE 8090/tcp
+
+ENTRYPOINT [ "/usr/local/bin/ocis-mcp-server" ]
