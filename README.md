@@ -17,7 +17,9 @@ oCIS APIs. This repo builds and publishes the image; the application source live
 
 By default the server speaks MCP over **stdio**: the MCP client starts the container and
 talks to it through stdin/stdout. `-i` is required — without it stdin is closed and the
-server exits immediately.
+server exits immediately. For the same reason a detached (`-d`) or Compose container in
+stdio mode exits at once with status 0; to run the server as a long-lived service, use the
+[HTTP transport](#http-transport).
 
 ```bash
 docker run -i --rm \
@@ -152,8 +154,9 @@ None. The server keeps no state; the container can run with `--read-only`.
 | `8090` | TCP | MCP streamable HTTP endpoint `/mcp` — only with `OCIS_MCP_TRANSPORT=http` |
 
 In the default stdio mode no port is opened. There is no health endpoint and no
-`HEALTHCHECK`; in HTTP mode, a request to `/mcp` without the bearer token answers `401`,
-which a TCP or HTTP probe can use.
+`HEALTHCHECK`. In HTTP mode, probe the port over TCP (e.g. a Kubernetes `tcpSocket`
+probe on `8090`): an HTTP probe fails, because `/mcp` answers `401` without the bearer
+token and `/` answers `404`.
 
 ## User and Filesystem
 
